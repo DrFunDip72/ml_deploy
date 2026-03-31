@@ -17,7 +17,7 @@ from ml.pipeline import (
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train and register late_delivery model.")
+    parser = argparse.ArgumentParser(description="Train and register is_fraud model.")
     parser.add_argument(
         "--model-version",
         default=None,
@@ -33,7 +33,7 @@ def main():
     load_dotenv()
 
     run_ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    model_version = args.model_version or f"late_delivery_{run_ts}"
+    model_version = args.model_version or f"is_fraud_{run_ts}"
     artifact_dir = os.path.join(args.artifact_dir, model_version)
 
     pg_conn = get_pg_conn()

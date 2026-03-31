@@ -24,7 +24,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
-LABEL_COL = "late_delivery"
+LABEL_COL = "is_fraud"
 FEATURE_TABLE = "warehouse_order_features"
 
 
@@ -213,13 +213,18 @@ def write_predictions(
     model_version: str,
     predictions_df: pd.DataFrame,
 ):
-    required_cols = {"shipment_id", "proba_late_delivery", "predicted_late_delivery"}
+    required_cols = {"order_id", "proba_is_fraud", "predicted_is_fraud"}
     missing = required_cols - set(predictions_df.columns)
     if missing:
         raise ValueError(f"Missing prediction columns: {missing}")
 
     rows = [
-        (int(r["shipment_id"]), model_version, int(r["predicted_late_delivery"]), float(r["proba_late_delivery"]))
+        (
+            int(r["order_id"]),
+            model_version,
+            int(r["predicted_is_fraud"]),
+            float(r["proba_is_fraud"]),
+        )
         for _, r in predictions_df.iterrows()
     ]
 
@@ -230,10 +235,10 @@ def write_predictions(
             cur,
             """
             INSERT INTO predictions (
-              shipment_id,
+              order_id,
               model_version,
-              predicted_late_delivery,
-              proba_late_delivery
+              predicted_is_fraud,
+              proba_is_fraud
             )
             VALUES %s
             """,
@@ -280,9 +285,9 @@ def train_and_score(
 
     predictions_df = pd.DataFrame(
         {
-            "shipment_id": df["shipment_id"].values,
-            "proba_late_delivery": full_proba,
-            "predicted_late_delivery": full_pred,
+            "order_id": df["order_id"].values,
+            "proba_is_fraud": full_proba,
+            "predicted_is_fraud": full_pred,
         }
     )
 
