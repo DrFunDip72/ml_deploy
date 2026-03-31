@@ -1,0 +1,43 @@
+name: Retrain late_delivery model
+
+on:
+  schedule:
+    # Nightly at 03:00 UTC
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+      SUPABASE_STORAGE_BUCKET_MODELS: ${{ secrets.SUPABASE_STORAGE_BUCKET_MODELS }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Apply Supabase migrations
+        run: |
+          set -euo pipefail
+          psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f supabase/migrations/001_create_operational_tables.sql
+          psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f supabase/migrations/002_create_warehouse_features.sql
+          psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f supabase/migrations/003_model_registry_predictions.sql
+
+      - name: Import shop.db -> operational tables
+        run: python scripts/import_shop_to_supabase.py --sqlite-path shop.db
+
+      - name: Train and write model + predictions
+        run: python ml/train.py --artifact-dir artifacts
+
