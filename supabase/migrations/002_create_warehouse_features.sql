@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS warehouse_order_features (
   customer_order_count INTEGER
 );
 
-TRUNCATE TABLE warehouse_order_features;
+-- CASCADE: predictions (003) references warehouse_order_features; re-runs must clear both.
+TRUNCATE TABLE warehouse_order_features CASCADE;
 
 WITH
 order_item_base AS (
