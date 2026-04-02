@@ -24,8 +24,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
+# Supervised target for training and scoring (not late_delivery).
 LABEL_COL = "is_fraud"
 FEATURE_TABLE = "warehouse_order_features"
+
+# Columns that must never be model inputs (alternate labels / legacy targets).
+EXCLUDED_FEATURE_COLS = frozenset({"late_delivery"})
 
 
 @dataclass
@@ -39,9 +43,9 @@ class TrainingResult:
 
 
 def get_pg_conn() -> psycopg2.extensions.connection:
-    db_url = os.environ.get("DATABASE_URL")
+    db_url = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL")
     if not db_url:
-        raise ValueError("Missing DATABASE_URL env var.")
+        raise ValueError("Missing DATABASE_URL/DB_URL env var.")
     return psycopg2.connect(db_url)
 
 
@@ -71,8 +75,9 @@ def feature_columns(df: pd.DataFrame, label_col: str = LABEL_COL) -> Tuple[List[
     ]
 
     id_cols = ["shipment_id", "order_id", label_col]
+    skip = set(id_cols) | EXCLUDED_FEATURE_COLS
     present_categorical = [c for c in categorical_cols if c in df.columns]
-    numeric_cols = [c for c in df.columns if c not in present_categorical and c not in id_cols]
+    numeric_cols = [c for c in df.columns if c not in present_categorical and c not in skip]
     return numeric_cols, present_categorical
 
 
@@ -125,7 +130,9 @@ def upload_artifact_to_supabase_storage(
     supabase_url = os.environ.get("SUPABASE_URL")
     bucket = os.environ.get("SUPABASE_STORAGE_BUCKET_MODELS", "model-artifacts")
     service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-    anon_key = os.environ.get("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+    anon_key = os.environ.get("NEXT_PUBLIC_SUPABASE_ANON_KEY") or os.environ.get(
+        "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY"
+    )
 
     if not (supabase_url and service_role_key and anon_key):
         return None
@@ -169,7 +176,6 @@ def write_model_registry(
     artifact_bucket = bucket if uploaded_artifact_path else None
     artifact_db_path = uploaded_artifact_path
 
-    pg_conn.autocommit = False
     with pg_conn.cursor() as cur:
         cur.execute(
             """
@@ -213,15 +219,20 @@ def write_predictions(
     model_version: str,
     predictions_df: pd.DataFrame,
 ):
-    required_cols = {"order_id", "proba_is_fraud", "predicted_is_fraud"}
+    required_cols = {"shipment_id", "order_id", "proba_is_fraud", "predicted_is_fraud"}
     missing = required_cols - set(predictions_df.columns)
     if missing:
         raise ValueError(f"Missing prediction columns: {missing}")
 
+    # Legacy NOT NULL columns (003): predicted_late_delivery, proba_late_delivery.
+    # Mirror fraud outputs so inserts satisfy the schema (see 004_predictions_fraud_semantics.sql).
     rows = [
         (
+            int(r["shipment_id"]),
             int(r["order_id"]),
             model_version,
+            int(r["predicted_is_fraud"]),
+            float(r["proba_is_fraud"]),
             int(r["predicted_is_fraud"]),
             float(r["proba_is_fraud"]),
         )
@@ -235,8 +246,11 @@ def write_predictions(
             cur,
             """
             INSERT INTO predictions (
+              shipment_id,
               order_id,
               model_version,
+              predicted_late_delivery,
+              proba_late_delivery,
               predicted_is_fraud,
               proba_is_fraud
             )
@@ -257,7 +271,8 @@ def train_and_score(
 ):
     numeric_cols, categorical_cols = feature_columns(df, label_col=label_col)
 
-    X = df.drop(columns=[label_col])
+    drop_x = {label_col} | (EXCLUDED_FEATURE_COLS & set(df.columns))
+    X = df.drop(columns=list(drop_x))
     y = df[label_col].astype(int).values
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -285,6 +300,7 @@ def train_and_score(
 
     predictions_df = pd.DataFrame(
         {
+            "shipment_id": df["shipment_id"].values,
             "order_id": df["order_id"].values,
             "proba_is_fraud": full_proba,
             "predicted_is_fraud": full_pred,

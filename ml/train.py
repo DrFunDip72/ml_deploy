@@ -30,7 +30,9 @@ def main():
     )
     args = parser.parse_args()
 
+    # Load root .env first, then app-level env file if present.
     load_dotenv()
+    load_dotenv("ml-deploy/.env.local", override=False)
 
     run_ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     model_version = args.model_version or f"is_fraud_{run_ts}"
