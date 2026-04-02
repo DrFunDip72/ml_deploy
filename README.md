@@ -29,7 +29,7 @@ Copy `.env.example` to `.env.local` for local work and set real values:
    - `005_warehouse_features_add_is_fraud.sql` adds/populates `warehouse_order_features.is_fraud`
 2. Run:
    - `python scripts/import_shop_to_supabase.py --sqlite-path shop.db`
-   - `python ml/train.py --artifact-dir artifacts`
+   - `python -m ml.train --artifact-dir artifacts`
 3. Start the UI:
    - `cd ml-deploy && npm run dev`
 
@@ -38,13 +38,15 @@ Copy `.env.example` to `.env.local` for local work and set real values:
 2. On `/`, load orders by customer email and confirm fraud score/predicted class appears when available.
 3. Open `/admin`, enter `ADMIN_DEMO_PASSCODE`, and load orders.
 4. Mark an order as Fraud (`1`) or Clean (`0`) and confirm the update persists.
-5. Re-run `python ml/train.py --artifact-dir artifacts` after new labels to refresh model outputs.
+5. Re-run `python -m ml.train --artifact-dir artifacts` after new labels to refresh model outputs.
 
 ## Scheduled retraining
-`.github/workflows/retrain.yml` runs nightly:
-1. Applies migrations
-2. Imports `shop.db`
-3. Trains a new model version and writes predictions to Supabase
+`.github/workflows/retrain.yml` runs **nightly at midnight UTC** (`0 0 * * *`):
+1. Applies SQL migrations **001** through **005** in order
+2. Imports `shop.db` into operational tables
+3. Runs `python -m ml.train --artifact-dir artifacts` to register a new model version and write predictions to Supabase
+
+Requires the same GitHub Actions [secrets](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions) as local env (`DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_STORAGE_BUCKET_MODELS`).
 
 ## Vercel URL
 Once the app is deployed to production, it includes:

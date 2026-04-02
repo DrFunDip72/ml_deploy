@@ -1,9 +1,9 @@
-name: Retrain late_delivery model
+name: Retrain is_fraud model
 
 on:
   schedule:
-    # Nightly at 03:00 UTC
-    - cron: "0 3 * * *"
+    # Nightly at 00:00 UTC (midnight UTC)
+    - cron: "0 0 * * *"
   workflow_dispatch: {}
 
 jobs:
@@ -34,10 +34,11 @@ jobs:
           psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f supabase/migrations/001_create_operational_tables.sql
           psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f supabase/migrations/002_create_warehouse_features.sql
           psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f supabase/migrations/003_model_registry_predictions.sql
+          psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f supabase/migrations/004_predictions_fraud_semantics.sql
+          psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f supabase/migrations/005_warehouse_features_add_is_fraud.sql
 
       - name: Import shop.db -> operational tables
         run: python scripts/import_shop_to_supabase.py --sqlite-path shop.db
 
       - name: Train and write model + predictions
-        run: python ml/train.py --artifact-dir artifacts
-
+        run: python -m ml.train --artifact-dir artifacts
