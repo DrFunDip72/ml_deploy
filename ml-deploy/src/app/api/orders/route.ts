@@ -208,7 +208,48 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: insertOrderErr.message }, { status: 500 });
     }
 
-    return NextResponse.json({ order: insertedOrder }, { status: 201 });
+    const placedOrderId = insertedOrder.order_id as number;
+
+    const { data: latestShipment, error: latestShipmentErr } = await supabase
+      .from("shipments")
+      .select("shipment_id")
+      .order("shipment_id", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latestShipmentErr) {
+      return NextResponse.json({ error: latestShipmentErr.message }, { status: 500 });
+    }
+
+    const nextShipmentId = Number(latestShipment?.shipment_id ?? 0) + 1;
+
+    const { error: insertShipmentErr } = await supabase.from("shipments").insert({
+      shipment_id: nextShipmentId,
+      order_id: placedOrderId,
+      ship_datetime: orderDatetime,
+      carrier: "standard",
+      shipping_method: "standard",
+      distance_band: "regional",
+      promised_days: 3,
+      actual_days: 3,
+      late_delivery: 0,
+    });
+
+    if (insertShipmentErr) {
+      return NextResponse.json({ error: insertShipmentErr.message }, { status: 500 });
+    }
+
+    const { error: syncErr } = await supabase.rpc("sync_warehouse_for_order", {
+      p_order_id: placedOrderId,
+    });
+
+    return NextResponse.json(
+      {
+        order: insertedOrder,
+        warehouseSyncError: syncErr?.message ?? null,
+      },
+      { status: 201 },
+    );
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to create order." },

@@ -48,7 +48,14 @@ export async function PATCH(
       return NextResponse.json({ error: "Order not found." }, { status: 404 });
     }
 
-    return NextResponse.json({ order: data });
+    const { error: syncErr } = await supabase.rpc("sync_warehouse_for_order", {
+      p_order_id: parsedOrderId,
+    });
+
+    return NextResponse.json({
+      order: data,
+      warehouseSyncError: syncErr?.message ?? null,
+    });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to update label." },

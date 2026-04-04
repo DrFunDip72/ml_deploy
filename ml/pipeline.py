@@ -309,3 +309,161 @@ def train_and_score(
 
     return model, artifact_path, predictions_df, metrics, len(X_train), len(X_test)
 
+
+def prepare_feature_matrix(df: pd.DataFrame, label_col: str = LABEL_COL) -> pd.DataFrame:
+    """Drop label and excluded columns; same layout as training inputs to the sklearn Pipeline."""
+    drop_x = {label_col} | (EXCLUDED_FEATURE_COLS & set(df.columns))
+    return df.drop(columns=[c for c in drop_x if c in df.columns])
+
+
+def fetch_latest_model_registry_row(
+    pg_conn: psycopg2.extensions.connection,
+    label_col: str = LABEL_COL,
+    feature_table: str = FEATURE_TABLE,
+) -> Optional[Dict[str, Optional[str]]]:
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT model_version, artifact_bucket, artifact_path
+            FROM model_registry
+            WHERE label_col = %s AND feature_table = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (label_col, feature_table),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "model_version": row[0],
+        "artifact_bucket": row[1],
+        "artifact_path": row[2],
+    }
+
+
+def download_model_joblib(
+    model_version: str,
+    artifact_bucket: Optional[str],
+    artifact_object_path: Optional[str],
+    dest_path: str,
+) -> bool:
+    """Download fitted pipeline from Supabase Storage (service role). Returns False on failure."""
+    if not (artifact_bucket and artifact_object_path):
+        return False
+    supabase_url = os.environ.get("SUPABASE_URL")
+    service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    anon_key = os.environ.get("NEXT_PUBLIC_SUPABASE_ANON_KEY") or os.environ.get(
+        "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY"
+    )
+    if not (supabase_url and service_role_key):
+        return False
+
+    url = f"{supabase_url}/storage/v1/object/{artifact_bucket}/{artifact_object_path}"
+    headers = {
+        "Authorization": f"Bearer {service_role_key}",
+        "apikey": anon_key or service_role_key,
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=120)
+        if resp.status_code != 200:
+            return False
+        os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+        with open(dest_path, "wb") as f:
+            f.write(resp.content)
+        return True
+    except Exception:
+        return False
+
+
+def fetch_unscored_warehouse_rows(
+    pg_conn: psycopg2.extensions.connection,
+    model_version: str,
+    feature_table: str = FEATURE_TABLE,
+) -> pd.DataFrame:
+    q = f"""
+    SELECT w.*
+    FROM {feature_table} w
+    WHERE NOT EXISTS (
+      SELECT 1 FROM predictions p
+      WHERE p.shipment_id = w.shipment_id AND p.model_version = %s
+    )
+    """
+    return pd.read_sql_query(q, pg_conn, params=(model_version,))
+
+
+def upsert_predictions_subset(
+    pg_conn: psycopg2.extensions.connection,
+    model_version: str,
+    predictions_df: pd.DataFrame,
+):
+    """Replace prediction rows for a subset of shipment_ids under the given model_version."""
+    if predictions_df.empty:
+        return
+    required_cols = {"shipment_id", "order_id", "proba_is_fraud", "predicted_is_fraud"}
+    missing = required_cols - set(predictions_df.columns)
+    if missing:
+        raise ValueError(f"Missing prediction columns: {missing}")
+
+    shipment_ids = [int(x) for x in predictions_df["shipment_id"].tolist()]
+    rows = [
+        (
+            int(r["shipment_id"]),
+            int(r["order_id"]),
+            model_version,
+            int(r["predicted_is_fraud"]),
+            float(r["proba_is_fraud"]),
+            int(r["predicted_is_fraud"]),
+            float(r["proba_is_fraud"]),
+        )
+        for _, r in predictions_df.iterrows()
+    ]
+
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM predictions WHERE model_version = %s AND shipment_id = ANY(%s)",
+            (model_version, shipment_ids),
+        )
+        execute_values(
+            cur,
+            """
+            INSERT INTO predictions (
+              shipment_id,
+              order_id,
+              model_version,
+              predicted_late_delivery,
+              proba_late_delivery,
+              predicted_is_fraud,
+              proba_is_fraud
+            )
+            VALUES %s
+            """,
+            rows,
+            page_size=500,
+        )
+    pg_conn.commit()
+
+
+def score_unscored_warehouse_rows(
+    pg_conn: psycopg2.extensions.connection,
+    model,
+    model_version: str,
+) -> int:
+    """Score warehouse rows that lack a predictions row for model_version. Returns count scored."""
+    df = fetch_unscored_warehouse_rows(pg_conn, model_version)
+    if df.empty:
+        return 0
+    X = prepare_feature_matrix(df)
+    proba = model.predict_proba(X)[:, 1]
+    pred = (proba >= 0.5).astype(int)
+    out = pd.DataFrame(
+        {
+            "shipment_id": df["shipment_id"].values,
+            "order_id": df["order_id"].values,
+            "proba_is_fraud": proba,
+            "predicted_is_fraud": pred,
+        }
+    )
+    upsert_predictions_subset(pg_conn, model_version, out)
+    return len(out)
+
